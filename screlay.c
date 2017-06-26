@@ -1,5 +1,5 @@
 /*
-    Steam Controller XInput Relayer
+    Steam Controller Xpad Relayer
     Copyright (C) 2017  PhaethonH
 
     This program is free software; you can redistribute it and/or modify
@@ -20,15 +20,10 @@
 /*
 Designed to work around Steam Controller not showing up in Euro Truck Simulator 2 ("ETS2").
 
-This program uses uinput (the same way Steam client itself does for Steam Controller) to create a new event device that does nothing but replicate the events from the Steam Controller generic XInput controller virtual device (USB Vendor:Product = 28de:11fc), but using a different vendor-id and product-id.
+This program uses uinput (the same way Steam client itself does for Steam Controller) to create a new event device that does nothing but replicate the events from the Steam Controller generic Xpad controller virtual device (USB Vendor:Product = 28de:11fc), but using a different vendor-id and product-id.
 
 In this case, Vendor:Product = f055:11fc.
 (0xf055 is the unofficial vendor-id for FOSS projects)
-*/
-/*
-   Terminology clarification
-   "XInput" is the Microsoft gamepad interface based on the Xbox 360 (2005) controller.
-   "XInput" is also the name of the X.org subsystem (2009) handling input devices in its X Window System (c.1984) implementation -- no relation to Microsoft's XInput, Microsoft Xbox, nor Microsoft Windows.
 */
 
 #include <assert.h>
@@ -37,6 +32,7 @@ In this case, Vendor:Product = f055:11fc.
 #include <linux/uinput.h>
 #include <errno.h>
 #include <unistd.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -62,7 +58,7 @@ In this case, Vendor:Product = f055:11fc.
 
 #define PACKAGE "screlay"
 
-#define MODELNAME "XInput Relay (SteamController)"
+#define MODELNAME "Xpad Relay (SteamController)"
 #define MODELREV 1
 
 
@@ -104,32 +100,34 @@ void die_on_negative (int wrapped_call)
 
 const char * DEFAULT_MODELNAME = MODELNAME;
 const char * DEFAULT_UINPUT_PATH = "/dev/uinput";
+/* Source device files expected to present these USB ID (originally Steam Controller virtual Xpad device 28de:11fc */
 const int DEFAULT_TARGET_VENDOR_ID = 0x28de;
 const int DEFAULT_TARGET_PRODUCT_ID = 0x11fc;
-const int MY_VENDOR_ID = 0xf055;
-const int MY_PRODUCT_ID = 0x11fc;
+/* USB ID to present to userspace (e.g. Euro Truck Simulator 2) */
+const int MY_VENDOR_ID = 0xf055;    /* "FOSS" */
+const int MY_PRODUCT_ID = 0x11fc;   /* Copy from Steam Controller Xpad */
 
 
 /* State information for the relay. */
 struct screlay_s {
     int halt;
     int verbose;
-
-    int opt_scan;
-
-    char modelname[255];    /* Human-readable device name */
-    char * uinput_path;  /* path to uinput node. */
     int fd;          /* fd to talk to uinput. */
-    char * srcpath;  /* Path of Steam Controller's XInput device. */
     int srcfd;       /* file descriptor after opening srcpath. */
 
     /* Search by vendor-id and product-id */
+    int opt_scan;
     int target_vendor;
     int target_product;
 
+    char modelname[255];    /* Human-readable device name */
+    char uinput_path[PATH_MAX];  /* path to uinput node. */
+    char srcpath[PATH_MAX];  /* Path of Steam Controller's Xpad device. */
+
     /* Input types to report as existing. */
-    int have_axis[ABS_CNT];
-    int have_key[KEY_CNT];
+    char have_ev[1 + EV_CNT/8];
+    char have_abs[1 + ABS_CNT/8];
+    char have_key[1 + KEY_CNT/8];
 
     /* source device identification information. */
     struct input_id idinfo;
@@ -144,7 +142,7 @@ void screlay_init ()
 {
   memset(inst, 0, sizeof(struct screlay_s));
   inst->verbose = 1;
-  inst->uinput_path = strdup(DEFAULT_UINPUT_PATH);
+  strcpy(inst->uinput_path, DEFAULT_UINPUT_PATH);
   inst->fd = -1;
   inst->srcfd = -1;
   inst->target_vendor = DEFAULT_TARGET_VENDOR_ID;
@@ -153,14 +151,6 @@ void screlay_init ()
 
 void screlay_destroy ()
 {
-  if (inst->uinput_path)
-    {
-      free(inst->uinput_path);
-    }
-  if (inst->srcpath)
-    {
-      free(inst->srcpath);
-    }
   if (inst->fd >= 0)
     {
       close(inst->fd);
@@ -207,7 +197,7 @@ int screlay_is_matched_usb_id (int fd)
   return 0;
 }
 
-/* Find (first) Steam Controller XInput device: first /dev/input/event* device
+/* Find (first) Steam Controller Xpad device: first /dev/input/event* device
  which has specific USB ID (default 28de:11fc). */
 int screlay_scan ()
 {
@@ -236,7 +226,7 @@ int screlay_scan ()
 	    }
 	  else
 	    {
-	      /* valid entry, check for SteamControllerXInput-ness */
+	      /* valid entry, check for SteamControllerXpad-ness */
 	      int srcfd;
 	      /* Require 'event' prefix. */
 	      if (0 != strncmp(entry.d_name, "event", 5))
@@ -245,7 +235,7 @@ int screlay_scan ()
 	      srcfd = screlay_open(scanpath);
 	      if (screlay_is_matched_usb_id(srcfd))
 		{
-		  inst->srcpath = strdup(scanpath);
+		  snprintf(inst->srcpath, sizeof(inst->srcpath), "%s", scanpath);
 		  inst->srcfd = srcfd;
 		  closedir(dir);
 		  dir = NULL;
@@ -272,16 +262,29 @@ int screlay_scan ()
 SCRELAY_BV_CB(ioc_set_evbit)
 {
   die_on_negative( ioctl(inst->fd, UI_SET_EVBIT, idx) );
+  return 0;
 }
 SCRELAY_BV_CB(ioc_set_absbit)
 {
   die_on_negative( ioctl(inst->fd, UI_SET_ABSBIT, idx) );
-  inst->have_axis[idx] = 1;
+  return 0;
 }
 SCRELAY_BV_CB(ioc_set_keybit)
 {
   die_on_negative( ioctl(inst->fd, UI_SET_KEYBIT, idx) );
-  inst->have_key[idx] = 1;
+  return 0;
+}
+SCRELAY_BV_CB(ioc_get_absinfo)
+{
+  struct input_absinfo absinfo;
+
+  ioctl(inst->srcfd, EVIOCGABS(idx), &absinfo);
+  inst->uidev.absmin[idx] = absinfo.minimum;
+  inst->uidev.absmax[idx] = absinfo.maximum;
+  inst->uidev.absfuzz[idx] = absinfo.fuzz;
+  inst->uidev.absflat[idx] = absinfo.flat;
+
+  return 0;
 }
 
 
@@ -301,6 +304,63 @@ void screlay_walk_bitvectoridx (char bitvector[], int vecbytes, int (*cb)(int))
 	    }
 	}
     }
+}
+
+static
+void screlay_register_abilities_by_data ()
+{
+  int res;
+
+  /* Bit-vector pattern.  These ioctls return a bitvector; positions
+   correponding to a binary 1 indicate a callback function to call for that
+   position (e.g. bit position 14 is set => call with 14). */
+  struct bitvector_scan_s {
+      int bvioc;  /* ioctl command returning bitvector. */
+      char * buf;  /* Start of bitvector to write. */
+      int (*cb)(int);  /* callback applied to bit positions that are set. */
+  } bitvector_scans[] = {
+	{ EVIOCGBIT(0, sizeof(inst->have_ev)), inst->have_ev, screlay_cb_ioc_set_evbit },
+	{ EVIOCGBIT(EV_ABS, sizeof(inst->have_abs)), inst->have_abs, screlay_cb_ioc_set_absbit },
+	{ EVIOCGBIT(EV_KEY, sizeof(inst->have_key)), inst->have_key, screlay_cb_ioc_set_keybit },
+	/* Extend for other input features as needed. */
+	{ 0, },
+  }, *iter;
+  for (iter = bitvector_scans; iter->cb; iter++)
+    {
+      if ( (res = ioctl(inst->srcfd, iter->bvioc, iter->buf)) > 0 )
+	  screlay_walk_bitvectoridx(iter->buf, res, iter->cb);
+    }
+}
+
+static
+void screlay_register_abilities_by_code ()
+{
+  int datasize = (KEY_CNT+1)/8;
+  char * data = malloc(datasize);
+  int res;
+
+  res = ioctl(inst->srcfd, EVIOCGBIT(0, datasize), data);
+  if (res > 0)
+    {
+      screlay_walk_bitvectoridx(data, res, screlay_cb_ioc_set_evbit);
+      memcpy(inst->have_ev, data, res);
+    }
+
+  res = ioctl(inst->srcfd, EVIOCGBIT(EV_ABS, datasize), data);
+  if (res > 0)
+    {
+      screlay_walk_bitvectoridx(data, res, screlay_cb_ioc_set_absbit);
+      memcpy(inst->have_abs, data, res);
+    }
+
+  res = ioctl(inst->srcfd, EVIOCGBIT(EV_KEY, datasize), data);
+  if (res > 0)
+    {
+      screlay_walk_bitvectoridx(data, res, screlay_cb_ioc_set_keybit);
+      memcpy(inst->have_key, data, res);
+    }
+
+  free(data);
 }
 
 /* Mimick "plugging in" the virtual device. */
@@ -324,58 +384,33 @@ int screlay_connect ()
   int codeidx;
   int syscode;
 
-  int datasize = (KEY_CNT+1)/8;
-  char * data = malloc(datasize);
   int nbyte, nbit;
+  int nbev = sizeof(inst->have_ev);
+  int nbabs = sizeof(inst->have_abs);
+  int nbkey = sizeof(inst->have_key);
 
   /* Register device abilities. */
-  res = ioctl(inst->srcfd, EVIOCGBIT(0, datasize), data);
-  if (res > 0)
-    {
-      screlay_walk_bitvectoridx(data, res, screlay_cb_ioc_set_evbit);
-    }
-
-  res = ioctl(inst->srcfd, EVIOCGBIT(EV_ABS, datasize), data);
-  if (res > 0)
-    {
-      screlay_walk_bitvectoridx(data, res, screlay_cb_ioc_set_absbit);
-    }
-
-  res = ioctl(inst->srcfd, EVIOCGBIT(EV_KEY, datasize), data);
-  if (res > 0)
-    {
-      screlay_walk_bitvectoridx(data, res, screlay_cb_ioc_set_keybit);
-    }
-
-  free(data);
+#if 1
+  screlay_register_abilities_by_data();
+#else
+  screlay_register_abilities_by_code();
+#endif //0
 
   /* Prepare the UINPUT device descriptor. */
   memset(&(inst->uidev), 0, sizeof(inst->uidev));
-
   /* Fill in the fields. */
   snprintf(inst->uidev.name, UINPUT_MAX_NAME_SIZE, MODELNAME);
   inst->uidev.id.bustype = BUS_VIRTUAL;
   inst->uidev.id.vendor = MY_VENDOR_ID;
   inst->uidev.id.product = MY_PRODUCT_ID;
   inst->uidev.id.version = MODELREV;
-
-  /* Copy absinfo from source. */
-  struct input_absinfo absinfo;
-  for (codeidx = 0; codeidx < ABS_CNT; codeidx++)
-    {
-      if (inst->have_axis[codeidx])
-	{
-	  ioctl(inst->srcfd, EVIOCGABS(codeidx), &absinfo);
-	  inst->uidev.absmin[codeidx] = absinfo.minimum;
-	  inst->uidev.absmax[codeidx] = absinfo.maximum;
-	  inst->uidev.absfuzz[codeidx] = absinfo.fuzz;
-	  inst->uidev.absflat[codeidx] = absinfo.flat;
-	}
-    }
+  /* Copy absinfo from source (also goes into inst->uidev). */
+  screlay_walk_bitvectoridx(inst->have_abs, sizeof(inst->have_abs), screlay_cb_ioc_get_absinfo);
 
   /* Write the device descriptor to the fd. */
   die_on_negative( write(inst->fd, &(inst->uidev), sizeof(inst->uidev)) );
 
+  /* Create ("connect") the relay device. */
   die_on_negative( ioctl(inst->fd, UI_DEV_CREATE) );
 
   /* Relay device now created. */
@@ -449,10 +484,11 @@ int screlay_mainloop ()
 
 
 
+/** argp(3) command-line argument parser. **/
 const char *argp_program_version = N_("screlay");
 const char *argp_program_bug_address = "<PhaethonH@gmail.com>";
 
-static char screlay_doc[] = N_("SC XInput Relay");
+static char screlay_doc[] = N_("SC Xpad Relay");
 
 /* A description of the arguments we accept. */
 static char args_doc[] = N_("");
@@ -466,8 +502,9 @@ static struct argp_option options[] = {
       { 0 },
 };
 
+static
 error_t
-parse_opt (int key, char *arg, struct argp_state *state)
+screlay_parse_opt (int key, char *arg, struct argp_state *state)
 {
   long i;
   char * p;
@@ -478,7 +515,7 @@ parse_opt (int key, char *arg, struct argp_state *state)
       inst->opt_scan = 1;
       break;
     case 'd':
-      inst->srcpath = strdup(arg);
+      snprintf(inst->srcpath, sizeof(inst->srcpath), "%s", arg);
       break;
     case 'q':
       inst->verbose = 0;
@@ -494,9 +531,10 @@ parse_opt (int key, char *arg, struct argp_state *state)
   return 0;
 }
 
-struct argp argp = { options, parse_opt, args_doc, screlay_doc };
+struct argp argp = { options, screlay_parse_opt, args_doc, screlay_doc };
 
 
+/* Initialize internationalization library/libraries. */
 int init_i18n ()
 {
   setlocale(LC_ALL, "");
@@ -508,26 +546,27 @@ int init_i18n ()
 
 int main (int argc, char ** argv)
 {
-  int ret;
-
   init_i18n();
 
   screlay_init();
 
   argp_parse(&argp, argc, argv, 0, 0, inst);
 
-//  inst->srcfd = screlay_open((inst->srcpath = strdup("/dev/input/event16")));
   if (inst->opt_scan)
     {
+      /* Auto-scan for xpad. */
       screlay_scan();
     }
-  else if (inst->srcpath)
+  else if (inst->srcpath[0])
     {
+      /* Explicit xpad. */
       inst->srcfd = screlay_open(inst->srcpath);
     }
   else
     {
+      /* Show usage. */
       argp_help(&argp, stdout, ARGP_HELP_USAGE, argv[0]);
+      screlay_destroy();
       exit(EXIT_FAILURE);
     }
   logmsg(1, _("Using relay source %s: [%04x:%04x] \"%s\"\n"), inst->srcpath, inst->idinfo.vendor, inst->idinfo.product, inst->modelname);
