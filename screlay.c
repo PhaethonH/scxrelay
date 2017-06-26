@@ -48,19 +48,19 @@ In this case, Vendor:Product = f055:11fc.
 #include <sys/select.h>
 #include <dirent.h>
 #include <signal.h>
-
-#include <locale.h>
-#include <libintl.h>
-#define _(String) gettext(String)
-#define N_(String) String
-//#define textdomain(Domain)
-//#define bindtextdomain(Package,Directory)
+#include <wchar.h>
 
 #include <argp.h>
 
+#include <locale.h>
+#include <libintl.h>
+#define _(String) String
+#define N_(String) String
+#define bindtextdomain(Package,Locale)
+#define textdomain(Package)
+
 
 #define PACKAGE "screlay"
-#define LOCALEDIR "locale"
 
 #define MODELNAME "XInput Relay (SteamController)"
 #define MODELREV 1
@@ -256,7 +256,7 @@ int screlay_scan ()
 	{
 	  closedir(dir);
 	  dir = NULL;
-	  perror(_("Scanning for event{proper noun} devices"));
+	  perror(_("Scanning for event devices"));
 	  exit(EXIT_FAILURE);
 	}
     }
@@ -264,6 +264,43 @@ int screlay_scan ()
   free(scanpath);
 
   return 0;
+}
+
+
+/* Set of callbacks applied to a bitvector. */
+#define SCRELAY_BV_CB(cbname) static int screlay_cb_##cbname (int idx)
+SCRELAY_BV_CB(ioc_set_evbit)
+{
+  die_on_negative( ioctl(inst->fd, UI_SET_EVBIT, idx) );
+}
+SCRELAY_BV_CB(ioc_set_absbit)
+{
+  die_on_negative( ioctl(inst->fd, UI_SET_ABSBIT, idx) );
+  inst->have_axis[idx] = 1;
+}
+SCRELAY_BV_CB(ioc_set_keybit)
+{
+  die_on_negative( ioctl(inst->fd, UI_SET_KEYBIT, idx) );
+  inst->have_key[idx] = 1;
+}
+
+
+/* Walk a bitvector, calling 'cb' with argument of the bit index that is set. */
+void screlay_walk_bitvectoridx (char bitvector[], int vecbytes, int (*cb)(int))
+{
+  int nbyte, nbit;
+
+  for (nbyte = 0; nbyte < vecbytes; nbyte++)
+    {
+      for (nbit = 0; nbit < 8; nbit++)
+	{
+	  if (bitvector[nbyte] & (1 << nbit))
+	    {
+	      int idx = (nbyte * 8) + nbit;
+	      cb(idx);
+	    }
+	}
+    }
 }
 
 /* Mimick "plugging in" the virtual device. */
@@ -280,7 +317,7 @@ int screlay_connect ()
   inst->fd = open(inst->uinput_path, O_WRONLY | O_NONBLOCK);
   if (inst->fd < 0)
     {
-      perror(_("Unable to open uinput{proper noun} device"));
+      perror(_("Unable to open uinput device"));
       exit(EXIT_FAILURE);
     }
 
@@ -295,51 +332,19 @@ int screlay_connect ()
   res = ioctl(inst->srcfd, EVIOCGBIT(0, datasize), data);
   if (res > 0)
     {
-      for (nbyte = 0; nbyte < res; nbyte++)
-	{
-	  for (nbit = 0; nbit < 8; nbit++)
-	    {
-	      if (data[nbyte] & (1 << nbit))
-		{
-		  int evtype = (nbyte*8)+nbit;
-		  die_on_negative( ioctl(inst->fd, UI_SET_EVBIT, evtype) );
-		}
-	    }
-	}
+      screlay_walk_bitvectoridx(data, res, screlay_cb_ioc_set_evbit);
     }
 
   res = ioctl(inst->srcfd, EVIOCGBIT(EV_ABS, datasize), data);
   if (res > 0)
     {
-      for (nbyte = 0; nbyte < res; nbyte++)
-	{
-	  for (nbit = 0; nbit < 8; nbit++)
-	    {
-	      if (data[nbyte] & (1 << nbit))
-		{
-		  int codeidx = (nbyte*8) + nbit;
-		  inst->have_axis[codeidx] = 1;
-		  die_on_negative( ioctl(inst->fd, UI_SET_ABSBIT, codeidx) );
-		}
-	    }
-	}
+      screlay_walk_bitvectoridx(data, res, screlay_cb_ioc_set_absbit);
     }
 
   res = ioctl(inst->srcfd, EVIOCGBIT(EV_KEY, datasize), data);
   if (res > 0)
     {
-      for (nbyte = 0; nbyte < res; nbyte++)
-	{
-	  for (nbit = 0; nbit < 8; nbit++)
-	    {
-	      if (data[nbyte] & (1 << nbit))
-		{
-		  int codeidx = (nbyte*8) + nbit;
-		  inst->have_key[codeidx] = 1;
-		  die_on_negative( ioctl(inst->fd, UI_SET_KEYBIT, codeidx) );
-		}
-	    }
-	}
+      screlay_walk_bitvectoridx(data, res, screlay_cb_ioc_set_keybit);
     }
 
   free(data);
@@ -429,7 +434,7 @@ int screlay_mainloop ()
 	}
       else if (res < 0)
 	{
-	  perror(_("Reading from source{qualifier} device file"));
+	  perror(_("Reading from source device file"));
 	  inst->halt = 1;
 	}
       else
@@ -454,7 +459,7 @@ static char args_doc[] = N_("");
 
 /* The options we understand. */
 static struct argp_option options[] = {
-      { "auto", 'a', 0, 0, N_("Auto-scan for relay{noun} source") },
+      { "auto", 'a', 0, 0, N_("Auto-scan for relay source") },
       { "device", 'd', N_("PATH"), 0, N_("Explicit device path (no scan, no id check)") },
       { "usbid", 'u', N_("USB_ID"), 0, N_("Scan to match USB ID for relay source [28de:11fc]") },
       { "quiet", 'q', 0, 0, N_("Verbose output") },
@@ -492,19 +497,12 @@ parse_opt (int key, char *arg, struct argp_state *state)
 struct argp argp = { options, parse_opt, args_doc, screlay_doc };
 
 
-int init_locale ()
+int init_i18n ()
 {
   setlocale(LC_ALL, "");
-  char localedir[4096];
-  getcwd(localedir, sizeof(localedir));
-  int n = strlen(localedir);
-  snprintf(localedir + n, sizeof(localedir)-n, "/locale");
-  printf("localedir = %s\n", localedir);
-  char * domain;
-  domain = bindtextdomain(PACKAGE, localedir);
-  printf("domain = %s\n", domain);
-  domain = textdomain(PACKAGE);
-  printf("textdomain = %s\n", domain);
+  bindtextdomain(PACKAGE, NULL);
+  textdomain(PACKAGE);
+  return 0;
 }
 
 
@@ -512,7 +510,7 @@ int main (int argc, char ** argv)
 {
   int ret;
 
-  init_locale();
+  init_i18n();
 
   screlay_init();
 
@@ -532,7 +530,7 @@ int main (int argc, char ** argv)
       argp_help(&argp, stdout, ARGP_HELP_USAGE, argv[0]);
       exit(EXIT_FAILURE);
     }
-  logmsg(1, _("Using relay{noun} source %s: [%04x:%04x] \"%s\"\n"), inst->srcpath, inst->idinfo.vendor, inst->idinfo.product, inst->modelname);
+  logmsg(1, _("Using relay source %s: [%04x:%04x] \"%s\"\n"), inst->srcpath, inst->idinfo.vendor, inst->idinfo.product, inst->modelname);
   if (inst->srcfd >= 0)
     {
       screlay_connect();
