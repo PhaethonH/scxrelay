@@ -1,6 +1,6 @@
 /* gcc -o minrelay minrelay.c */
 /*
-    Steam Controller Xpad Minimalist Relayer.
+    Steam Controller Xpad Minimalist Relayer
     Copyright (C) 2017  PhaethonH <PhaethonH@gmail.com>
 
     This program is free software; you can redistribute it and/or modify
@@ -26,7 +26,7 @@ and copying all events from the Steam Controller xpad (virtual) device.
 For some reason, this works if the USB Vendor ID is not Valve's.
 Run before starting ETS2, so the virtual device is visible to the game.
 
-Source text strongly assumes a SteamOS environment to minimize coding.
+Source code strongly assumes a SteamOS environment to minimize coding.
 That is, there is no concern for portability.
 
 Auxiliary/external programs are expected to assist the user (e.g. GUI).
@@ -46,6 +46,7 @@ Auxiliary/external programs are expected to assist the user (e.g. GUI).
 
 #define PACKAGE "scminrelay"
 
+/* i18n preparations. */
 #define _(String) String
 #define N_(String) String
 
@@ -55,7 +56,7 @@ const int modelrev = 1;
 const int my_vendor = 0xf055;  /* "FOSS" */
 const int my_product = 0x11fc; /* Steam Controller xpad. */
 #ifndef PATH_MAX
-#define PATH_MAX 4096  // SteamOS assumption.
+#define PATH_MAX 4096  /* SteamOS assumption. */
 #endif
 
 
@@ -83,6 +84,7 @@ int logmsg (int loglevel, const char * fmt, ...)
   return retval;
 }
 
+/* Naive handling of failed system calls: exit immediately with failure. */
 static
 void die_on_negative (int wrapped_call)
 {
@@ -107,75 +109,62 @@ char have_key[NBV_KEY] = { 0, };
 struct input_id idinfo;
 struct uinput_user_dev uidev;
 char event_path[PATH_MAX] = "";
-char uinput_path[PATH_MAX] = "/dev/uinput";  // SteamOS assumption.
+char uinput_path[PATH_MAX] = "/dev/uinput";  /* SteamOS assumption. */
 
 
 /** Events Relay **/
 
-/* Inform uinput of supported input features (copied from source event device) */
+/* Tell uinput of supported input features (copied from source event device) */
 static
-void screlay_register_features_by_code ()
+void scxrelay_register_features_by_code ()
 {
   int res;
   int nbyte, nbit, idx;
+
+  /* Convoluted syntax to allow simple curly braces after FOREACH_SET_BIT()
+     Abuses shortcut evaluation and side effect of assignment-as-expression.
+   */
+#define FOREACH_SET_BIT(idxvar, bv, bytecount) \
+  for (nbyte = 0; nbyte < bytecount; nbyte++) \
+    for (nbit = 0; nbit < 8; nbit++) \
+      if ( ((bv)[nbyte] & (1 << nbit)) && ((idxvar=nbyte*8+nbit)) )
 
   /* Query source device for supported events (bitvector). */
   res = ioctl(srcfd, EVIOCGBIT(0, NBV_EV), have_ev);
   if (res > 0)
     {
       /* Traverse bit vector and replicate features. */
-      for (nbyte = 0; nbyte < res; nbyte++)
+      FOREACH_SET_BIT(idx, have_ev, res)
 	{
-	  for (nbit = 0; nbit < 8; nbit++)
-	    {
-	      if (have_ev[nbyte] & (1 << nbit))
-		{
-		  idx = (nbyte*8) + nbit;
-		  die_on_negative( ioctl(uinputfd, UI_SET_EVBIT, idx) );
-		}
-	    }
+	  die_on_negative( ioctl(uinputfd, UI_SET_EVBIT, idx) );
 	}
     }
 
-  /* Query (bitvector) */
+  /* Query (bitvector) - axes */
   res = ioctl(srcfd, EVIOCGBIT(EV_ABS, NBV_ABS), have_abs);
   if (res > 0)
     {
       /* Traverse and replicate. */
-      for (nbyte = 0; nbyte < res; nbyte++)
+      FOREACH_SET_BIT(idx, have_abs, res)
 	{
-	  for (nbit = 0; nbit < 8; nbit++)
-	    {
-	      if (have_abs[nbyte] & (1 << nbit))
-		{
-		  idx = (nbyte*8) + nbit;
-		  die_on_negative( ioctl(uinputfd, UI_SET_ABSBIT, idx) );
-		}
-	    }
+	  die_on_negative( ioctl(uinputfd, UI_SET_ABSBIT, idx) );
 	}
     }
 
-  /* Query (bitvector) */
+  /* Query (bitvector) - buttons */
   res = ioctl(srcfd, EVIOCGBIT(EV_KEY, NBV_KEY), have_key);
   if (res > 0)
     {
       /* Traverse and replicate. */
-      for (nbyte = 0; nbyte < res; nbyte++)
+      FOREACH_SET_BIT(idx, have_key, res)
 	{
-	  for (nbit = 0; nbit < 8; nbit++)
-	    {
-	      if (have_key[nbyte] & (1 << nbit))
-		{
-		  idx = (nbyte*8) + nbit;
-		  die_on_negative( ioctl(uinputfd, UI_SET_KEYBIT, idx) );
-		}
-	    }
+	  die_on_negative( ioctl(uinputfd, UI_SET_KEYBIT, idx) );
 	}
     }
 }
 
 /* Mimick "plugging in" the virtual device. */
-int screlay_connect ()
+int scxrelay_connect ()
 {
   int res;
   struct input_absinfo absinfo;
@@ -197,10 +186,10 @@ int screlay_connect ()
       return -1;
     }
 
-  logmsg(1, "relay: %s\n", event_path);
+  printf("relay: %s\n", event_path);
 
   /* Register features. */
-  screlay_register_features_by_code();
+  scxrelay_register_features_by_code();
 
   /* Prepare the UINPUT device descriptor. */
   memset(&(uidev), 0, sizeof(uidev));
@@ -210,19 +199,16 @@ int screlay_connect ()
   uidev.id.product = my_product;
   uidev.id.version = modelrev;
   /* Copy absinfo from source (also goes into uidev). */
-  for (nbyte = 0; nbyte < NBV_EV; nbyte++)
+  FOREACH_SET_BIT(idx, have_abs, NBV_EV)
     {
-      for (nbit = 0; nbit < 8; nbit++)
+      if (have_abs[nbyte] & (1 << nbit))
 	{
-	  if (have_abs[nbyte] & (1 << nbit))
-	    {
-	      idx = (nbyte*8) + nbit;
-	      die_on_negative( ioctl(srcfd, EVIOCGABS(idx), &absinfo) );
-	      uidev.absmin[idx] = absinfo.minimum;
-	      uidev.absmax[idx] = absinfo.maximum;
-	      uidev.absfuzz[idx] = absinfo.fuzz;
-	      uidev.absflat[idx] = absinfo.flat;
-	    }
+	  idx = (nbyte*8) + nbit;
+	  die_on_negative( ioctl(srcfd, EVIOCGABS(idx), &absinfo) );
+	  uidev.absmin[idx] = absinfo.minimum;
+	  uidev.absmax[idx] = absinfo.maximum;
+	  uidev.absfuzz[idx] = absinfo.fuzz;
+	  uidev.absflat[idx] = absinfo.flat;
 	}
     }
 
@@ -238,7 +224,7 @@ int screlay_connect ()
 }
 
 /* Mimick disconnecting ("unplugging") the relay device. */
-int screlay_disconnect ()
+int scxrelay_disconnect ()
 {
   int ret;
   ret = ioctl(uinputfd, UI_DEV_DESTROY);
@@ -253,9 +239,11 @@ void on_sigint (int signum)
 }
 
 /* Main loop, intended to be terminated with SIGINT (Control-C). */
-int screlay_mainloop ()
+int scxrelay_mainloop ()
 {
   int res;
+  int nfds;
+  long rfds, wfds, efds;
   struct input_event ev;
   const int evsize = sizeof(struct input_event);
 
@@ -270,8 +258,8 @@ int screlay_mainloop ()
   /* main loop */
   while (! halt)
     {
-      /* Read from source device. */
-      res = read(srcfd, &ev, evsize); // blocked call; SIGINT tends to be here.
+      /* Blocking read from source device; SIGINT tends to be here. */
+      res = read(srcfd, &ev, evsize);
       if (res == evsize)
 	{
 	  /* steady state: copy event to relay device. */
@@ -294,7 +282,7 @@ int screlay_mainloop ()
       else
 	{
 	  /* partial read. */
-	  fprintf(stderr, _("ERROR: Partial read %d from source device file\n"), res);
+	  logmsg(1, _("Partial read %d from source device file.\n"), res);
 	  halt = 1;
 	}
     }
@@ -314,7 +302,6 @@ void usage (int argc, char ** argv)
 Minimalist Steam Controller xpad relay device.\n\
 ", argv[0]);
 }
-
 
 int main (int argc, char ** argv)
 {
@@ -337,11 +324,11 @@ int main (int argc, char ** argv)
     }
 
 
-  if (screlay_connect() == 0)
+  if (scxrelay_connect() == 0)
     {
-      screlay_mainloop();
-      screlay_disconnect();
-      puts("");
+      scxrelay_mainloop();
+      scxrelay_disconnect();
+      fputs("", stdout);
     }
   else
     {
