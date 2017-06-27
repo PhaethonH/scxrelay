@@ -1,4 +1,4 @@
-/* gcc -o minrelay minrelay.c */
+/* gcc -o scxrelay scxrelay.c */
 /*
     Steam Controller Xpad Minimalist Relayer
     Copyright (C) 2017  PhaethonH <PhaethonH@gmail.com>
@@ -33,7 +33,7 @@ Auxiliary/external programs are expected to assist the user (e.g. GUI).
 */
 /*
 Usage 1: command-line arguments
-$ minrelay /dev/input/eventNN /dev/uinput
+$ scxrelay /dev/input/eventNN /dev/uinput
 
 First argument is path to the event device to use as source device (the Steam
 Controller xpad device).
@@ -103,7 +103,7 @@ Sample usage (C):
 #include <linux/uinput.h>
 #include <sys/select.h>
 
-#define PACKAGE "scminrelay"
+#define PACKAGE "scxrelay"
 
 /* i18n preparations. */
 #define _(String) String
