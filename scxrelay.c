@@ -314,6 +314,7 @@ int scxrelay_mainloop ()
   int busyfail = 0;
   struct input_event ev;
   const int evsize = sizeof(struct input_event);
+  int ignore_stdin = 2;  // check for already-closed stdin.
 
   /* Trap SIGINT; allow interrupting syscall (read(2)) to terminate program. */
   struct sigaction act;
@@ -330,11 +331,26 @@ int scxrelay_mainloop ()
       FD_ZERO(&rfds);
       FD_ZERO(&wfds);
       FD_ZERO(&efds);
-      FD_SET(0, &rfds);
+      if (ignore_stdin != 1)
+	{
+	  FD_SET(0, &rfds);
+	  FD_SET(0, &efds);
+	}
       FD_SET(srcfd, &rfds);
-      nfds = 8;
-      /* Blocked wait.  SIGINT tends to be here. */
-      res = select(nfds, &rfds, &wfds, &efds, NULL);
+      nfds = srcfd+1;
+      if (ignore_stdin == 2)
+	{
+	  /* First pass, timeout immediately. */
+	  struct timeval tv;
+	  tv.tv_sec = 0;
+	  tv.tv_usec = 0;
+	  res = select(nfds, &rfds, &wfds, &efds, &tv);
+	}
+      else
+	{
+	  /* steady state; blocked wait; SIGINT tends to be here. */
+	  res = select(nfds, &rfds, &wfds, &efds, NULL);
+	}
       if (res < 0)
 	{
 	  /* Error on select. */
@@ -354,9 +370,20 @@ int scxrelay_mainloop ()
 	  if (count == 0)
 	    {
 	      /* EOF */
-	      halt = 1;
+	      if (ignore_stdin == 2)
+		{
+		  /* stdin EOF from the start.  Wasn't interactive. */
+		  ignore_stdin = 1;
+		}
+	      else
+		{
+		  /* what was interactive like, now closed. */
+		  halt = 1;
+		}
 	    }
 	}
+      if (ignore_stdin == 2)
+	  ignore_stdin = 0;
 
       if (FD_ISSET(srcfd, &rfds))
 	{
