@@ -110,7 +110,7 @@ Sample usage (C):
 #define N_(String) String
 
 /** Constants. **/
-const char * modelname = "Xpad MiniRelay (SteamController)";
+const char * modelname = "Xpad Relay (SteamController)";
 const int modelrev = 1;
 const int my_vendor = 0xf055;  /* "FOSS" */
 const int my_product = 0x11fc; /* Steam Controller xpad. */
@@ -303,6 +303,40 @@ void on_sigint (int signum)
   halt = 1;
 }
 
+int scxrelay_copy_event ()
+{
+  int res;
+  struct input_event ev;
+  const int evsize = sizeof(struct input_event);
+
+  res = read(srcfd, &ev, evsize);
+  if (res == evsize)
+    {
+      /* steady state: copy event to relay device. */
+      write(uinputfd, &ev, evsize);
+    }
+  else if (res == 0)
+    {
+      /* source closed/disappeared. */
+      halt = 1;
+    }
+  else if (res < 0)
+    {
+      if (errno != EINTR)
+	{
+	  /* stay silent for SIGINT. */
+	  perror(_("Reading from source device file"));
+	}
+      halt = 1;
+    }
+  else
+    {
+      /* partial read. */
+      logmsg(1, _("Partial read %d from source device file.\n"), res);
+      halt = 1;
+    }
+}
+
 char dummybuf[4096];
 
 /* Main loop, intended to be terminated with SIGINT (Control-C). */
@@ -312,8 +346,6 @@ int scxrelay_mainloop ()
   int nfds;
   fd_set rfds, wfds, efds;
   int busyfail = 0;
-  struct input_event ev;
-  const int evsize = sizeof(struct input_event);
   int ignore_stdin = 2;  // check for already-closed stdin.
 
   /* Trap SIGINT; allow interrupting syscall (read(2)) to terminate program. */
@@ -387,32 +419,7 @@ int scxrelay_mainloop ()
 
       if (FD_ISSET(srcfd, &rfds))
 	{
-	  res = read(srcfd, &ev, evsize);
-	  if (res == evsize)
-	    {
-	      /* steady state: copy event to relay device. */
-	      write(uinputfd, &ev, evsize);
-	    }
-	  else if (res == 0)
-	    {
-	      /* source closed/disappeared. */
-	      halt = 1;
-	    }
-	  else if (res < 0)
-	    {
-	      if (errno != EINTR)
-		{
-		  /* stay silent for SIGINT. */
-		  perror(_("Reading from source device file"));
-		}
-	      halt = 1;
-	    }
-	  else
-	    {
-	      /* partial read. */
-	      logmsg(1, _("Partial read %d from source device file.\n"), res);
-	      halt = 1;
-	    }
+	  scxrelay_copy_event();
 	}
     }
 
