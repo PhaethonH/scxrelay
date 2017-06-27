@@ -46,6 +46,7 @@ Usage 2: subprocess fds
 fd 3 if opened is assumed to be the event device opened for read.
 fd 4 if opened is assumed to be the uinput device opened for read-write; if fd
 4 is not available, tries "/dev/uinput".
+Both fds are closed upon program termination.
 
 Sample usage (C):
 {
@@ -183,9 +184,9 @@ void scxrelay_register_features_by_code ()
      Abuses shortcut evaluation and side effect of assignment-as-expression.
    */
 #define FOREACH_SET_BIT(idxvar, bv, bytecount) \
-  for (nbyte = 0; nbyte < bytecount; nbyte++) \
-    for (nbit = 0; nbit < 8; nbit++) \
-      if ( ((bv)[nbyte] & (1 << nbit)) && ((idxvar=nbyte*8+nbit)) )
+  for (nbyte = 0, idxvar = 0; nbyte < bytecount; nbyte++) \
+    for (nbit = 0; nbit < 8; nbit++, idxvar++) \
+      if ((bv)[nbyte] & (1 << nbit))
 
   /* Query source device for supported events (bitvector). */
   res = ioctl(srcfd, EVIOCGBIT(0, NBV_EV), have_ev);
@@ -393,9 +394,27 @@ int scxrelay_mainloop ()
   return 0;
 }
 
+/* Runs after resolving event_device and uinput_device. */
+int scxrelay_main ()
+{
+  if (scxrelay_connect() == 0)
+    {
+      scxrelay_mainloop();
+      scxrelay_disconnect();
+      fputs("", stdout);
+    }
+  else
+    {
+      return -1;
+    }
+
+  return 0;
+}
+
 
 /** Command-line interface **/
 
+/* Show usage information. */
 void usage (int argc, char ** argv)
 {
   fprintf(stdout, "Usage: %s source_event_device [UINPUT_PATH]\n\
@@ -449,19 +468,8 @@ int main (int argc, char ** argv)
       snprintf(uinput_path, sizeof(uinput_path), "%s", argv[2]);
     }
 
+  res = scxrelay_main();
 
-  if (scxrelay_connect() == 0)
-    {
-      scxrelay_mainloop();
-      scxrelay_disconnect();
-      fputs("", stdout);
-    }
-  else
-    {
-      errcode = EXIT_FAILURE;
-    }
-
-
-  return errcode;
+  return (res == 0 ? EXIT_SUCCESS : EXIT_FAILURE);
 }
 
