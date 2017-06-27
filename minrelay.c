@@ -32,17 +32,18 @@ That is, there is no concern for portability.
 Auxiliary/external programs are expected to assist the user (e.g. GUI).
 */
 
-#include <linux/input.h>
-#include <linux/uinput.h>
 #include <errno.h>
-#include <unistd.h>
+#include <fcntl.h>
 #include <limits.h>
+#include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdarg.h>
-#include <fcntl.h>
-#include <signal.h>
+#include <unistd.h>
+#include <linux/input.h>
+#include <linux/uinput.h>
+#include <sys/select.h>
 
 #define PACKAGE "scminrelay"
 
@@ -171,7 +172,10 @@ int scxrelay_connect ()
   int nbyte, nbit, idx;
 
   /* Open the source event device. */
-  srcfd = open(event_path, O_RDONLY);
+  if (srcfd < 0)
+    {
+      srcfd = open(event_path, O_RDONLY);
+    }
   if (srcfd < 0)
     {
       perror(_(event_path));
@@ -179,7 +183,10 @@ int scxrelay_connect ()
     }
 
   /* Open the uinput device. */
-  uinputfd = open(uinput_path, O_WRONLY | O_NONBLOCK);
+  if (uinputfd < 0)
+    {
+      uinputfd = open(uinput_path, O_WRONLY | O_NONBLOCK);
+    }
   if (uinputfd < 0)
     {
       perror(_(uinput_path));
@@ -238,12 +245,15 @@ void on_sigint (int signum)
   halt = 1;
 }
 
+char dummybuf[4096];
+
 /* Main loop, intended to be terminated with SIGINT (Control-C). */
 int scxrelay_mainloop ()
 {
   int res;
   int nfds;
-  long rfds, wfds, efds;
+  fd_set rfds, wfds, efds;
+  int busyfail = 0;
   struct input_event ev;
   const int evsize = sizeof(struct input_event);
 
@@ -258,32 +268,66 @@ int scxrelay_mainloop ()
   /* main loop */
   while (! halt)
     {
-      /* Blocking read from source device; SIGINT tends to be here. */
-      res = read(srcfd, &ev, evsize);
-      if (res == evsize)
+      /* prepare select() call. */
+      FD_ZERO(&rfds);
+      FD_ZERO(&wfds);
+      FD_ZERO(&efds);
+      FD_SET(0, &rfds);
+      FD_SET(srcfd, &rfds);
+      nfds = 8;
+      /* Blocked wait.  SIGINT tends to be here. */
+      res = select(nfds, &rfds, &wfds, &efds, NULL);
+      if (res < 0)
 	{
-	  /* steady state: copy event to relay device. */
-	  write(uinputfd, &ev, evsize);
-	}
-      else if (res == 0)
-	{
-	  /* source closed/disappeared. */
-	  halt = 1;
-	}
-      else if (res < 0)
-	{
-	  if (errno != EINTR)
+	  /* Error on select. */
+	  if (busyfail++ > 1000)
 	    {
-	      /* stay silent for SIGINT. */
-	      perror(_("Reading from source device file"));
+	      logmsg(1, _("Excessive failures in select()"));
+	      halt = 1;
 	    }
-	  halt = 1;
+	  continue;
 	}
-      else
+      busyfail = 0;
+
+      /* Check if stdin is closed. */
+      if (FD_ISSET(0, &rfds))
 	{
-	  /* partial read. */
-	  logmsg(1, _("Partial read %d from source device file.\n"), res);
-	  halt = 1;
+	  int count = read(0, dummybuf, sizeof(dummybuf));
+	  if (count == 0)
+	    {
+	      /* EOF */
+	      halt = 1;
+	    }
+	}
+
+      if (FD_ISSET(srcfd, &rfds))
+	{
+	  res = read(srcfd, &ev, evsize);
+	  if (res == evsize)
+	    {
+	      /* steady state: copy event to relay device. */
+	      write(uinputfd, &ev, evsize);
+	    }
+	  else if (res == 0)
+	    {
+	      /* source closed/disappeared. */
+	      halt = 1;
+	    }
+	  else if (res < 0)
+	    {
+	      if (errno != EINTR)
+		{
+		  /* stay silent for SIGINT. */
+		  perror(_("Reading from source device file"));
+		}
+	      halt = 1;
+	    }
+	  else
+	    {
+	      /* partial read. */
+	      logmsg(1, _("Partial read %d from source device file.\n"), res);
+	      halt = 1;
+	    }
 	}
     }
 
@@ -300,18 +344,43 @@ void usage (int argc, char ** argv)
   fprintf(stdout, "Usage: %s source_event_device [UINPUT_PATH]\n\
 \n\
 Minimalist Steam Controller xpad relay device.\n\
+May omit 'source_event_device' if fd 3 is opened for read on event device.\n\
+If fd 4 is opened, it is treated as read-write fd for uinput device.\n\
+Terminate the program by closing its stdin (fd 0).\n\
 ", argv[0]);
 }
 
 int main (int argc, char ** argv)
 {
   int errcode = EXIT_SUCCESS;
+  int res;
 
   if (argc < 2)
     {
-      usage(argc, argv);
-      return EXIT_FAILURE;
+      /* Test fd 3 as event device. */
+      res = fcntl(3, F_GETFD);
+      if (res == 0)
+	{
+	  srcfd = 3;
+	  strcpy(event_path, "-");
+	}
+
+      /* Test fd 4 as uinput handle. */
+      res = fcntl(4, F_GETFD);
+      if (res == 0)
+	{
+	  uinputfd = 4;
+	  strcpy(uinput_path, "-");
+	}
+
+      if (srcfd == -1)
+	{
+	  /* No event device specified. */
+	  usage(argc, argv);
+	  return EXIT_FAILURE;
+	}
     }
+
   if (argc > 1)
     {
       /* event device. */
