@@ -120,7 +120,7 @@ struct screlay_s {
     int target_vendor;
     int target_product;
 
-    char modelname[255];    /* Human-readable device name */
+    char src_model[255];    /* Human-readable device name of source. */
     char uinput_path[PATH_MAX];  /* path to uinput node. */
     char srcpath[PATH_MAX];  /* Path of Steam Controller's Xpad device. */
 
@@ -170,10 +170,10 @@ int screlay_open (const char * sc_path)
     }
 
   /* Get device name; might fail. */
-  res = ioctl(fd, EVIOCGNAME(sizeof(inst->modelname)), inst->modelname);
+  res = ioctl(fd, EVIOCGNAME(sizeof(inst->src_model)), inst->src_model);
   if (res < 0)
     {
-      inst->modelname[0] = 0;
+      inst->src_model[0] = 0;
     }
 
   return fd;
@@ -399,7 +399,7 @@ int screlay_connect ()
   /* Prepare the UINPUT device descriptor. */
   memset(&(inst->uidev), 0, sizeof(inst->uidev));
   /* Fill in the fields. */
-  snprintf(inst->uidev.name, UINPUT_MAX_NAME_SIZE, MODELNAME);
+  snprintf(inst->uidev.name, UINPUT_MAX_NAME_SIZE, "%s", MODELNAME);
   inst->uidev.id.bustype = BUS_VIRTUAL;
   inst->uidev.id.vendor = MY_VENDOR_ID;
   inst->uidev.id.product = MY_PRODUCT_ID;
@@ -569,7 +569,7 @@ int main (int argc, char ** argv)
       screlay_destroy();
       exit(EXIT_FAILURE);
     }
-  logmsg(1, _("Using relay source %s: [%04x:%04x] \"%s\"\n"), inst->srcpath, inst->idinfo.vendor, inst->idinfo.product, inst->modelname);
+  logmsg(1, _("Using relay source %s: [%04x:%04x] \"%s\"\n"), inst->srcpath, inst->idinfo.vendor, inst->idinfo.product, inst->src_model);
   if (inst->srcfd >= 0)
     {
       screlay_connect();
@@ -581,6 +581,6 @@ int main (int argc, char ** argv)
 
   puts(_("Done."));
 
-  return 0;
+  return EXIT_SUCCESS;
 }
 
