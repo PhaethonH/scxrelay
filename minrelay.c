@@ -31,6 +31,63 @@ That is, there is no concern for portability.
 
 Auxiliary/external programs are expected to assist the user (e.g. GUI).
 */
+/*
+Usage 1: command-line arguments
+$ minrelay /dev/input/eventNN /dev/uinput
+
+First argument is path to the event device to use as source device (the Steam
+Controller xpad device).
+Second argument, optional, specifies the uinput device; if not provided,
+assumes "/dev/uinput".
+*/
+/*
+Usage 2: subprocess fds
+
+fd 3 if opened is assumed to be the event device opened for read.
+fd 4 if opened is assumed to be the uinput device opened for read-write; if fd
+4 is not available, tries "/dev/uinput".
+
+Sample usage (C):
+{
+  int childpid;
+  int controlfd[2];
+
+  pipe(controlfd);
+
+  childpid = fork();
+
+  if (childpid == 0)
+    {
+      int evdevfd;
+      int uinputfd;
+
+      close(0);
+      dup2(controlfd[0], 0);
+      close(controlfd[0]);
+      close(controlfd[1]);
+
+      evdevfd = open(PATH_TO_EVENT_DEVICE, O_RDONLY);
+      dup2(evdevfd, 3);
+      close(evdevfd);
+
+      uinputfd = open(PATH_TO_UINPUT_DEVICE, O_RDWR);
+      dup2(uinputfd, 4);
+      close(uinputfd);
+
+      execl("scxrelay", "scxrelay", NULL);
+    }
+  else
+    {
+      close(controlfd[0]);
+      // track childpid.
+    }
+
+    ...
+
+    // terminate event relay.
+    close(controlfd[0]);
+}
+*/
 
 #include <errno.h>
 #include <fcntl.h>
