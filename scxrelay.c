@@ -360,8 +360,8 @@ scxrelay_mainloop ()
       struct pollfd fds[] = {
 	    { inst->srcfd, POLLIN, 0 },
       };
-      struct pollfd *fdsiter = fds+0;
-      nfds = sizeof(fds) / sizeof(fds[0]);
+      struct pollfd *fdsiter = fds + 0;
+      nfds = sizeof (fds) / sizeof (fds[0]);
 
       res = poll (fds, nfds, 100);	/* SIGINT mostly happens here. */
 
