@@ -313,7 +313,7 @@ scxrelay_copy_event ()
   if (res == evsize)
     {
       /* steady state: copy event to relay device. */
-      write (inst->uinputfd, &ev, evsize);
+      die_on_negative( write (inst->uinputfd, &ev, evsize));
     }
   else if (res == 0)
     {
