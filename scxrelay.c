@@ -45,7 +45,6 @@ Usage (no-shell, programmatic POSIX interface):
 Open fd 3 for read-write on the Steam Controller xpad device.
 Open fd 4 for read-write on the uinput device.
 fd 0,1,2 are not significant, and may be closed.
-Output on fd 1 to expect is newline-terminated string of the path to the newly created virtual event device.
 Terminate with SIGINT.
 
 
@@ -280,7 +279,6 @@ scxrelay_connect ()
   die_on_negative (ioctl (inst->uinputfd, UI_DEV_CREATE));
 
   /* Relay device now created. */
-  printf ("%s\n", inst->event_path);
 
   return 0;
 }
@@ -415,7 +413,6 @@ usage (int argc, char **argv)
 Minimalist Steam Controller xpad relay device.\n\
 May omit 'source_event_device' if fd 3 is opened for read-write on event device.\n\
 If fd 4 is opened, it is treated as read-write fd for uinput device.\n\
-Writes to fd 1 the path name of the newly created event device used for relay.\n\
 Terminate the program by sending signal SIGINT (press Control-C).\n\
 ", argv[0]);
 }
