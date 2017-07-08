@@ -344,7 +344,6 @@ int
 scxrelay_mainloop ()
 {
   int res;
-  int nfds = 0;
 
   /* Trap SIGINT; allow interrupting syscall (poll(2)), to terminate program. */
   struct sigaction act;
@@ -357,11 +356,12 @@ scxrelay_mainloop ()
   /* main loop */
   while (!inst->halt)
     {
+      /* Build array of pollfd in program stack (use heap in future?). */
       struct pollfd fds[] = {
 	    { inst->srcfd, POLLIN, 0 },
       };
       struct pollfd *fdsiter = fds + 0;
-      nfds = sizeof (fds) / sizeof (fds[0]);
+      int nfds = sizeof (fds) / sizeof (fds[0]);
 
       res = poll (fds, nfds, 100);	/* SIGINT mostly happens here. */
 
@@ -371,7 +371,10 @@ scxrelay_mainloop ()
 	    {
 	      if (fdsiter->fd == inst->srcfd)
 		{
-		  scxrelay_copy_event ();
+		  if (fdsiter->revents & POLLIN)
+		    {
+		      scxrelay_copy_event ();
+		    }
 		}
 	    }
 	}
