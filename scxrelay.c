@@ -1,94 +1,64 @@
 /* gcc -o scxrelay scxrelay.c */
 /*
-    Steam Controller Xpad Minimalist Relayer
-    Copyright (C) 2017  PhaethonH <PhaethonH@gmail.com>
+   Steam Controller Xpad Minimalist Relayer
+   Copyright (C) 2017  PhaethonH <PhaethonH@gmail.com>
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
+   This program is free software; you can redistribute it and/or modify
+   it under the terms of the GNU General Public License as published by
+   the Free Software Foundation; either version 2 of the License, or
+   (at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License along
-    with this program; if not, write to the Free Software Foundation, Inc.,
-    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
-*/
+   You should have received a copy of the GNU General Public License along
+   with this program; if not, write to the Free Software Foundation, Inc.,
+   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 /*
-Given an event input device, relays/mirrors events under a different USB ID.
+Purpose: relay xpad (gamepad) events from the Steam Controller's virtual xpad device to another virtual event device with a different vendor ID.
 
-Designed to work around Steam Controller joystick not showing up in
-Euro Truck Simulator 2 ("ETS2"), by creating a new virtual input device
-and copying all events from the Steam Controller xpad (virtual) device.
-For some reason, this works if the USB Vendor ID is not Valve's.
-Run before starting ETS2, so the virtual device is visible to the game.
+Background: as of 2017-06-24, Euro Truck Simulator 2 (ETS2) does not recognize
+Steam Controller's virtual xpad device.  After experimenting with uinput and
+virtual event devices, a pattern emerged where devices reporting Valve's
+vendorID would not be detected by ETS2, but those reporting vendorID 0xf055
+(among others) would.  Simply mirroring the reported events from Steam
+Controller's xpad device through another virtual device, changing *only* the
+VendorID, resulted in an xpad device usable in ETS2.
 
-Source code strongly assumes a SteamOS environment to minimize coding.
-That is, there is no concern for portability.
 
-Auxiliary/external programs are expected to assist the user (e.g. GUI).
-*/
-/*
-Usage 1: command-line arguments
-$ scxrelay /dev/input/eventNN /dev/uinput
+Usage (command-line shell):
+$ scxrelay /dev/input/eventNN [/dev/uinput]
 
-First argument is path to the event device to use as source device (the Steam
-Controller xpad device).
-Second argument, optional, specifies the uinput device; if not provided,
-assumes "/dev/uinput".
-*/
-/*
-Usage 2: subprocess fds
+First argument is the Steam Controller's xpad device from which to copy.
 
-fd 3 if opened is assumed to be the event device opened for read.
-fd 4 if opened is assumed to be the uinput device opened for read-write; if fd
-4 is not available, tries "/dev/uinput".
-Both fds are closed upon program termination.
+Second argument is optional, an explicit path to the uinput device through
+which the program creates a new virtual event device and repeats the xpad
+events.  If not specified, defaults to "/dev/uinput".
 
-Sample usage (C):
-{
-  int childpid;
-  int controlfd[2];
+Use Control-C to terminate.
 
-  pipe(controlfd);
 
-  childpid = fork();
+Usage (no-shell, programmatic POSIX interface):
+Open fd 3 for read-write on the Steam Controller xpad device.
+Open fd 4 for read-write on the uinput device.
+fd 0,1,2 are not significant, and may be closed.
+Output on fd 1 to expect is newline-terminated string of the path to the newly created virtual event device.
+Terminate with SIGINT.
 
-  if (childpid == 0)
-    {
-      int evdevfd;
-      int uinputfd;
 
-      close(0);
-      dup2(controlfd[0], 0);
-      close(controlfd[0]);
-      close(controlfd[1]);
+Halt conditions:
+Receive SIGINT.
+Failure to read from xpad device (e.g. on Steam Controller disconnect).
+Faiulre to write to uinput device.
 
-      evdevfd = open(PATH_TO_EVENT_DEVICE, O_RDONLY);
-      dup2(evdevfd, 3);
-      close(evdevfd);
-
-      uinputfd = open(PATH_TO_UINPUT_DEVICE, O_RDWR);
-      dup2(uinputfd, 4);
-      close(uinputfd);
-
-      execl("scxrelay", "scxrelay", NULL);
-    }
-  else
-    {
-      close(controlfd[0]);
-      // track childpid.
-    }
-
-    ...
-
-    // terminate event relay.
-    close(controlfd[0]);
-}
-*/
+Other notes:
+This program pares down functionality to an absolute minimum.
+I expect an external program ("front-end") to enhance user experience.
+The assumed environment is SteamOS.
+ */
 
 #include <errno.h>
 #include <fcntl.h>
@@ -101,7 +71,7 @@ Sample usage (C):
 #include <unistd.h>
 #include <linux/input.h>
 #include <linux/uinput.h>
-#include <sys/select.h>
+#include <poll.h>
 
 #define PACKAGE "scxrelay"
 
@@ -110,72 +80,91 @@ Sample usage (C):
 #define N_(String) String
 
 /** Constants. **/
-const char * modelname = "Xpad Relay (SteamController)";
-const int modelrev = 1;
-const int my_vendor = 0xf055;  /* "FOSS" */
-const int my_product = 0x11fc; /* Steam Controller xpad. */
+const char *SCXRELAY_MODELNAME = "Xpad Relay (SteamController)";
+const int SCXRELAY_MODELREV = 1;
+const int SCXRELAY_VENDORID = 0xF055;	/* "FOSS", unofficial vendorID */
+const int SCXRELAY_PRODUCTID = 0x11fc;	/* Steam Controller xpad. */
 #ifndef PATH_MAX
-#define PATH_MAX 4096  /* SteamOS assumption. */
+#define PATH_MAX 4096		/* SteamOS */
 #endif
 
 
 /** Logging **/
 int logthreshold = 0;
 
-int vlogmsg (int loglevel, const char * fmt, va_list vp)
+int
+vlogmsg (int loglevel, const char *fmt, va_list vp)
 {
   int retval = 0;
   if (loglevel > logthreshold)
     {
-      retval = vfprintf(stderr, fmt, vp);
-      fflush(stderr);
+      retval = vfprintf (stderr, fmt, vp);
+      fflush (stderr);
     }
   return retval;
 }
 
-int logmsg (int loglevel, const char * fmt, ...)
+int
+logmsg (int loglevel, const char *fmt, ...)
 {
   va_list vp;
   int retval = 0;
-  va_start(vp, fmt);
-  retval = vlogmsg(loglevel, fmt, vp);
-  va_end(vp);
+  va_start (vp, fmt);
+  retval = vlogmsg (loglevel, fmt, vp);
+  va_end (vp);
   return retval;
 }
 
-/* Naive handling of failed system calls: exit immediately with failure. */
-static
-void die_on_negative (int wrapped_call)
+/* Naïve handling of failed system calls: exit immediately with failure. */
+static void
+die_on_negative (int wrapped_call)
 {
   if (wrapped_call < 0)
     {
-      perror(_("ERROR"));
-      exit(EXIT_FAILURE);
+      perror (_("ERROR"));
+      exit (EXIT_FAILURE);
     }
 }
 
 
 /** Run-time state **/
-int halt = 0;
-int srcfd = -1;
-int uinputfd = -1;
+struct scxrelay_s
+{
+  int halt;			/* Controls main loop; 0 to keep looping. */
+  int srcfd;			/* fd of Steam Controller virtual xpad device; -1 for none. */
+  int uinputfd;			/* fd of uinput; -1 for none. */
+  /* bit vectors */
 #define NBV_EV (1 + EV_CNT/8)
 #define NBV_ABS (1 + ABS_CNT/8)
 #define NBV_KEY (1 + KEY_CNT/8)
-char have_ev[NBV_EV] = { 0, };
-char have_abs[NBV_ABS] = { 0, };
-char have_key[NBV_KEY] = { 0, };
-struct input_id idinfo;
-struct uinput_user_dev uidev;
-char event_path[PATH_MAX] = "";
-char uinput_path[PATH_MAX] = "/dev/uinput";  /* SteamOS assumption. */
+  char have_ev[NBV_EV];		/* bit vector of event types supported by srcfd.  */
+  char have_abs[NBV_ABS];	/* bit vector of axes supported by srcfd. */
+  char have_key[NBV_KEY];	/* bit vector of keys/buttons, srcfd. */
+  struct uinput_user_dev uidev;	/* New virtual device info, for uinput. */
+  char event_path[PATH_MAX];	/* Path name used to open srcfd. */
+  char uinput_path[PATH_MAX];	/* Path name used to open uinputfd. */
+};
+
+typedef struct scxrelay_s scxrelay_t;
+
+scxrelay_t _inst,		/* Global single instantiation of run-time state. */
+ *inst = &_inst;		/* and pointer to instance. */
 
 
 /** Events Relay **/
 
+void
+scxrelay_init ()
+{
+  memset (inst, 0, sizeof (*inst));
+  inst->srcfd = -1;
+  inst->uinputfd = -1;
+  snprintf (inst->uinput_path, sizeof (inst->uinput_path), "/dev/uinput");
+}
+
 /* Tell uinput of supported input features (copied from source event device) */
-static
-void scxrelay_register_features_by_code ()
+static void
+scxrelay_register_features_by_code ()
 {
   int res;
   int nbyte, nbit, idx;
@@ -185,257 +174,226 @@ void scxrelay_register_features_by_code ()
    */
 #define FOREACH_SET_BIT(idxvar, bv, bytecount) \
   for (nbyte = 0, idxvar = 0; nbyte < bytecount; nbyte++) \
-    for (nbit = 0; nbit < 8; nbit++, idxvar++) \
-      if ((bv)[nbyte] & (1 << nbit))
+  for (nbit = 0; nbit < 8; nbit++, idxvar++) \
+  if ((bv)[nbyte] & (1 << nbit))
 
   /* Query source device for supported events (bitvector). */
-  res = ioctl(srcfd, EVIOCGBIT(0, NBV_EV), have_ev);
+  res = ioctl (inst->srcfd, EVIOCGBIT (0, NBV_EV), inst->have_ev);
   if (res > 0)
     {
       /* Traverse bit vector and replicate features. */
-      FOREACH_SET_BIT(idx, have_ev, res)
-	{
-	  die_on_negative( ioctl(uinputfd, UI_SET_EVBIT, idx) );
-	}
+      FOREACH_SET_BIT (idx, inst->have_ev, res)
+      {
+	die_on_negative (ioctl (inst->uinputfd, UI_SET_EVBIT, idx));
+      }
     }
 
   /* Query (bitvector) - axes */
-  res = ioctl(srcfd, EVIOCGBIT(EV_ABS, NBV_ABS), have_abs);
+  res = ioctl (inst->srcfd, EVIOCGBIT (EV_ABS, NBV_ABS), inst->have_abs);
   if (res > 0)
     {
       /* Traverse and replicate. */
-      FOREACH_SET_BIT(idx, have_abs, res)
-	{
-	  die_on_negative( ioctl(uinputfd, UI_SET_ABSBIT, idx) );
-	}
+      FOREACH_SET_BIT (idx, inst->have_abs, res)
+      {
+	die_on_negative (ioctl (inst->uinputfd, UI_SET_ABSBIT, idx));
+      }
     }
 
   /* Query (bitvector) - buttons */
-  res = ioctl(srcfd, EVIOCGBIT(EV_KEY, NBV_KEY), have_key);
+  res = ioctl (inst->srcfd, EVIOCGBIT (EV_KEY, NBV_KEY), inst->have_key);
   if (res > 0)
     {
       /* Traverse and replicate. */
-      FOREACH_SET_BIT(idx, have_key, res)
-	{
-	  die_on_negative( ioctl(uinputfd, UI_SET_KEYBIT, idx) );
-	}
+      FOREACH_SET_BIT (idx, inst->have_key, res)
+      {
+	die_on_negative (ioctl (inst->uinputfd, UI_SET_KEYBIT, idx));
+      }
     }
 }
 
-/* Mimick "plugging in" the virtual device. */
-int scxrelay_connect ()
+/* Mimick "plugging in" the virtual device.
+   Returns 0 on success, -1 on failure (then see errno). */
+int
+scxrelay_connect ()
 {
   int res;
   struct input_absinfo absinfo;
   int nbyte, nbit, idx;
 
   /* Open the source event device. */
-  if (srcfd < 0)
+  if (inst->srcfd < 0)
     {
-      srcfd = open(event_path, O_RDONLY);
+      inst->srcfd = open (inst->event_path, O_RDWR);
     }
-  if (srcfd < 0)
+  if (inst->srcfd < 0)
     {
-      perror(_(event_path));
+      /* Open read-write failed.  Try read-only (no haptic feedback). */
+      inst->srcfd = open (inst->event_path, O_RDONLY);
+    }
+  if (inst->srcfd < 0)
+    {
+      /* Cannot open at all. */
+      perror (_(inst->event_path));
       return -1;
     }
 
   /* Open the uinput device. */
-  if (uinputfd < 0)
+  if (inst->uinputfd < 0)
     {
-      uinputfd = open(uinput_path, O_WRONLY | O_NONBLOCK);
+      inst->uinputfd = open (inst->uinput_path, O_RDWR);
     }
-  if (uinputfd < 0)
+  if (inst->uinputfd < 0)
     {
-      perror(_(uinput_path));
+      perror (_(inst->uinput_path));
       return -1;
     }
 
-  printf("relay: %s\n", event_path);
-
-  /* Register features. */
-  scxrelay_register_features_by_code();
+  /* Register input device features. */
+  scxrelay_register_features_by_code ();
 
   /* Prepare the UINPUT device descriptor. */
-  memset(&(uidev), 0, sizeof(uidev));
-  snprintf(uidev.name, UINPUT_MAX_NAME_SIZE, "%s", modelname);
-  uidev.id.bustype = BUS_VIRTUAL;
-  uidev.id.vendor = my_vendor;
-  uidev.id.product = my_product;
-  uidev.id.version = modelrev;
+  memset (&(inst->uidev), 0, sizeof (inst->uidev));
+  snprintf (inst->uidev.name, UINPUT_MAX_NAME_SIZE, "%s", SCXRELAY_MODELNAME);
+  inst->uidev.id.bustype = BUS_VIRTUAL;
+  inst->uidev.id.vendor = SCXRELAY_VENDORID;
+  inst->uidev.id.product = SCXRELAY_PRODUCTID;
+  inst->uidev.id.version = SCXRELAY_MODELREV;
   /* Copy absinfo from source (also goes into uidev). */
-  FOREACH_SET_BIT(idx, have_abs, NBV_EV)
-    {
-      if (have_abs[nbyte] & (1 << nbit))
-	{
-	  idx = (nbyte*8) + nbit;
-	  die_on_negative( ioctl(srcfd, EVIOCGABS(idx), &absinfo) );
-	  uidev.absmin[idx] = absinfo.minimum;
-	  uidev.absmax[idx] = absinfo.maximum;
-	  uidev.absfuzz[idx] = absinfo.fuzz;
-	  uidev.absflat[idx] = absinfo.flat;
-	}
-    }
+  FOREACH_SET_BIT (idx, inst->have_abs, NBV_EV)
+  {
+    if (inst->have_abs[nbyte] & (1 << nbit))
+      {
+	idx = (nbyte * 8) + nbit;
+	die_on_negative (ioctl (inst->srcfd, EVIOCGABS (idx), &absinfo));
+	inst->uidev.absmin[idx] = absinfo.minimum;
+	inst->uidev.absmax[idx] = absinfo.maximum;
+	inst->uidev.absfuzz[idx] = absinfo.fuzz;
+	inst->uidev.absflat[idx] = absinfo.flat;
+      }
+  }
 
   /* Write the device descriptor to the fd. */
-  die_on_negative( write(uinputfd, &(uidev), sizeof(uidev)) );
+  die_on_negative (write
+		   (inst->uinputfd, &(inst->uidev), sizeof (inst->uidev)));
 
   /* Create ("connect") the relay device. */
-  die_on_negative( ioctl(uinputfd, UI_DEV_CREATE) );
+  die_on_negative (ioctl (inst->uinputfd, UI_DEV_CREATE));
 
   /* Relay device now created. */
+  printf ("%s\n", inst->event_path);
 
   return 0;
 }
 
-/* Mimick disconnecting ("unplugging") the relay device. */
-int scxrelay_disconnect ()
+/* Mimick disconnecting ("unplugging") the relay device.
+   Returns 0 on success, -1 on error (then see errno).  */
+int
+scxrelay_disconnect ()
 {
   int ret;
-  ret = ioctl(uinputfd, UI_DEV_DESTROY);
+  ret = ioctl (inst->uinputfd, UI_DEV_DESTROY);
   return ret;
 }
 
 /* Signal handler for SIGINT (Control-C), primary means of ending program. */
-static
-void on_sigint (int signum)
+static void
+on_sigint (int signum)
 {
-  halt = 1;
+  inst->halt = 1;
 }
 
-int scxrelay_copy_event ()
+/* Copy one instance of input_event from source device to destination device
+   (the relay) */
+void
+scxrelay_copy_event ()
 {
   int res;
   struct input_event ev;
-  const int evsize = sizeof(struct input_event);
+  const int evsize = sizeof (struct input_event);
 
-  res = read(srcfd, &ev, evsize);
+  res = read (inst->srcfd, &ev, evsize);
   if (res == evsize)
     {
       /* steady state: copy event to relay device. */
-      write(uinputfd, &ev, evsize);
+      write (inst->uinputfd, &ev, evsize);
     }
   else if (res == 0)
     {
       /* source closed/disappeared. */
-      halt = 1;
+      inst->halt = 1;
     }
   else if (res < 0)
     {
       if (errno != EINTR)
 	{
 	  /* stay silent for SIGINT. */
-	  perror(_("Reading from source device file"));
+	  perror (_("Reading from source device file"));
 	}
-      halt = 1;
+      inst->halt = 1;
     }
   else
     {
       /* partial read. */
-      logmsg(1, _("Partial read %d from source device file.\n"), res);
-      halt = 1;
+      logmsg (1, _("Partial read %d from source device file.\n"), res);
+      inst->halt = 1;
     }
 }
 
-char dummybuf[4096];
-
-/* Main loop, intended to be terminated with SIGINT (Control-C). */
-int scxrelay_mainloop ()
+/* Main loop, intended to be terminated with SIGINT (Control-C).
+   Returns shell-sense status code (EXIT_SUCCESS, EXIT_FAILURE).
+ */
+int
+scxrelay_mainloop ()
 {
   int res;
-  int nfds;
-  fd_set rfds, wfds, efds;
-  int busyfail = 0;
-  int ignore_stdin = 2;  // check for already-closed stdin.
+  int nfds = 0;
 
-  /* Trap SIGINT; allow interrupting syscall (read(2)) to terminate program. */
+  /* Trap SIGINT; allow interrupting syscall (poll(2)), to terminate program. */
   struct sigaction act;
   act.sa_handler = on_sigint;
-  sigemptyset(&(act.sa_mask));
+  sigemptyset (&(act.sa_mask));
   act.sa_flags = SA_NODEFER | SA_RESETHAND;
-  sigaction(SIGINT, &act, NULL);
+  sigaction (SIGINT, &act, NULL);
 
-  halt = 0;
+  inst->halt = 0;
   /* main loop */
-  while (! halt)
+  while (!inst->halt)
     {
-      /* prepare select() call. */
-      FD_ZERO(&rfds);
-      FD_ZERO(&wfds);
-      FD_ZERO(&efds);
-      if (ignore_stdin != 1)
-	{
-	  FD_SET(0, &rfds);
-	  FD_SET(0, &efds);
-	}
-      FD_SET(srcfd, &rfds);
-      nfds = srcfd+1;
-      if (ignore_stdin == 2)
-	{
-	  /* First pass, timeout immediately. */
-	  struct timeval tv;
-	  tv.tv_sec = 0;
-	  tv.tv_usec = 0;
-	  res = select(nfds, &rfds, &wfds, &efds, &tv);
-	}
-      else
-	{
-	  /* steady state; blocked wait; SIGINT tends to be here. */
-	  res = select(nfds, &rfds, &wfds, &efds, NULL);
-	}
-      if (res < 0)
-	{
-	  /* Error on select. */
-	  if (busyfail++ > 1000)
-	    {
-	      logmsg(1, _("Excessive failures in select()"));
-	      halt = 1;
-	    }
-	  continue;
-	}
-      busyfail = 0;
+      struct pollfd fds[] = {
+	    { inst->srcfd, POLLIN, 0 },
+      };
+      struct pollfd *fdsiter = fds+0;
+      nfds = sizeof(fds) / sizeof(fds[0]);
 
-      /* Check if stdin is closed. */
-      if (FD_ISSET(0, &rfds))
+      res = poll (fds, nfds, 100);	/* SIGINT mostly happens here. */
+
+      if (res > 0)
 	{
-	  int count = read(0, dummybuf, sizeof(dummybuf));
-	  if (count == 0)
+	  for (fdsiter = fds + 0; fdsiter < fds + nfds; fdsiter++)
 	    {
-	      /* EOF */
-	      if (ignore_stdin == 2)
+	      if (fdsiter->fd == inst->srcfd)
 		{
-		  /* stdin EOF from the start.  Wasn't interactive. */
-		  ignore_stdin = 1;
-		}
-	      else
-		{
-		  /* what was interactive like, now closed. */
-		  halt = 1;
+		  scxrelay_copy_event ();
 		}
 	    }
-	}
-      if (ignore_stdin == 2)
-	  ignore_stdin = 0;
-
-      if (FD_ISSET(srcfd, &rfds))
-	{
-	  scxrelay_copy_event();
 	}
     }
 
-  /* cleanup */
+  /* loop cleanup */
 
   return 0;
 }
 
-/* Runs after resolving event_device and uinput_device. */
-int scxrelay_main ()
+/* Runs after resolving event_device and uinput_device (options).
+   Return shell-sense status code (EXIT_SUCCESS, EXIT_FAILURE).  */
+int
+scxrelay_main ()
 {
-  if (scxrelay_connect() == 0)
+  if (scxrelay_connect () == 0)
     {
-      scxrelay_mainloop();
-      scxrelay_disconnect();
-      fputs("", stdout);
+      scxrelay_mainloop ();
+      scxrelay_disconnect ();
+      fputs ("", stdout);
     }
   else
     {
@@ -449,61 +407,69 @@ int scxrelay_main ()
 /** Command-line interface **/
 
 /* Show usage information. */
-void usage (int argc, char ** argv)
+void
+usage (int argc, char **argv)
 {
-  fprintf(stdout, "Usage: %s source_event_device [UINPUT_PATH]\n\
+  fprintf (stdout, "Usage: %s source_event_device [UINPUT_PATH]\n\
 \n\
 Minimalist Steam Controller xpad relay device.\n\
-May omit 'source_event_device' if fd 3 is opened for read on event device.\n\
+May omit 'source_event_device' if fd 3 is opened for read-write on event device.\n\
 If fd 4 is opened, it is treated as read-write fd for uinput device.\n\
-Terminate the program by closing its stdin (fd 0).\n\
+Writes to fd 1 the path name of the newly created event device used for relay.\n\
+Terminate the program by sending signal SIGINT (press Control-C).\n\
 ", argv[0]);
 }
 
-int main (int argc, char ** argv)
+static int
+is_fd_open (int probe_fd)
+{
+  int res = fcntl (probe_fd, F_GETFD);
+  return (res == 0);
+}
+
+int
+main (int argc, char **argv)
 {
   int errcode = EXIT_SUCCESS;
   int res;
 
+  scxrelay_init ();
+
   if (argc < 2)
     {
-      /* Test fd 3 as event device. */
-      res = fcntl(3, F_GETFD);
-      if (res == 0)
+      /* No command-line arguments.  Assume pass by file descriptors. */
+      if (is_fd_open (3))
 	{
-	  srcfd = 3;
-	  strcpy(event_path, "-");
+	  inst->srcfd = 3;
+	  strcpy (inst->event_path, "-");
 	}
 
-      /* Test fd 4 as uinput handle. */
-      res = fcntl(4, F_GETFD);
-      if (res == 0)
+      if (is_fd_open (4))
 	{
-	  uinputfd = 4;
-	  strcpy(uinput_path, "-");
+	  inst->uinputfd = 4;
+	  strcpy (inst->uinput_path, "-");
 	}
 
-      if (srcfd == -1)
+      if (inst->srcfd == -1)
 	{
-	  /* No event device specified. */
-	  usage(argc, argv);
+	  /* No event device specified, and insufficient arguments. */
+	  usage (argc, argv);
 	  return EXIT_FAILURE;
 	}
     }
 
   if (argc > 1)
     {
-      /* event device. */
-      snprintf(event_path, sizeof(event_path), "%s", argv[1]);
+      /* event device path name. */
+      snprintf (inst->event_path, sizeof (inst->event_path), "%s", argv[1]);
     }
   if (argc > 2)
     {
-      /* uinput path. */
-      snprintf(uinput_path, sizeof(uinput_path), "%s", argv[2]);
+      /* uinput path name. */
+      snprintf (inst->uinput_path, sizeof (inst->uinput_path), "%s", argv[2]);
     }
 
-  res = scxrelay_main();
+  res = scxrelay_main ();
 
   return (res == 0 ? EXIT_SUCCESS : EXIT_FAILURE);
 }
-
