@@ -73,6 +73,7 @@ The assumed environment is SteamOS.
 #include <poll.h>
 
 #define PACKAGE "scxrelay"
+#define VERSION "0.01"
 
 /* i18n preparations. */
 #define _(String) String
@@ -142,11 +143,12 @@ struct scxrelay_s
   struct uinput_user_dev uidev;	/* New virtual device info, for uinput. */
   char event_path[PATH_MAX];	/* Path name used to open srcfd. */
   char uinput_path[PATH_MAX];	/* Path name used to open uinputfd. */
+  int filter_sysbutton;
 };
 
 typedef struct scxrelay_s scxrelay_t;
 
-scxrelay_t _inst,		/* Global single instantiation of run-time state. */
+scxrelay_t _inst = { 0, },		/* Global single instantiation of run-time state. */
  *inst = &_inst;		/* and pointer to instance. */
 
 
@@ -313,6 +315,12 @@ scxrelay_copy_event ()
   if (res == evsize)
     {
       /* steady state: copy event to relay device. */
+      if (inst->filter_sysbutton)
+        {
+	  /* system ("Home", "Guide", "Steam", ...) button ignored. */
+	  if ((ev.type == EV_KEY) && (ev.code == 10))
+	    return;
+        }
       die_on_negative( write (inst->uinputfd, &ev, evsize));
     }
   else if (res == 0)
