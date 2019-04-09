@@ -88,6 +88,15 @@ const int SCXRELAY_PRODUCTID = 0x11fc;	/* Steam Controller xpad. */
 #define PATH_MAX 4096		/* SteamOS */
 #endif
 
+/* Recovery from failure states. */
+enum scxstate_e {
+    SCXSTATE_INIT,    /* starting up; nothing in progress yet. */
+    SCXSTATE_STEADY,  /* the steady state. */
+    SCXSTATE_FAILED,  /* read failed; attempt recovery (re-open). */
+
+    SCXSTATE_HALT,    /* terminate process. */
+};
+
 
 /** Logging **/
 int logthreshold = 0;
@@ -130,7 +139,7 @@ die_on_negative (int wrapped_call)
 /** Run-time state **/
 struct scxrelay_s
 {
-  int halt;			/* Controls main loop; 0 to keep looping. */
+  enum scxstate_e state;	/* Controls main loop behavior; HALT to stop. */
   int srcfd;			/* fd of Steam Controller virtual xpad device; -1 for none. */
   int uinputfd;			/* fd of uinput; -1 for none. */
   /* bit vectors */
@@ -299,7 +308,7 @@ scxrelay_disconnect ()
 static void
 on_sigint (int signum)
 {
-  inst->halt = 1;
+  inst->state = SCXSTATE_HALT;
 }
 
 /* Copy one instance of input_event from source device to destination device
@@ -326,7 +335,7 @@ scxrelay_copy_event ()
   else if (res == 0)
     {
       /* source closed/disappeared. */
-      inst->halt = 1;
+      inst->state = SCXSTATE_HALT;
     }
   else if (res < 0)
     {
@@ -335,13 +344,13 @@ scxrelay_copy_event ()
 	  /* stay silent for SIGINT. */
 	  perror (_("Reading from source device file"));
 	}
-      inst->halt = 1;
+      inst->state = SCXSTATE_HALT;
     }
   else
     {
       /* partial read. */
       logmsg (1, _("Partial read %d from source device file.\n"), res);
-      inst->halt = 1;
+      inst->state = SCXSTATE_HALT;
     }
 }
 
@@ -360,31 +369,71 @@ scxrelay_mainloop ()
   act.sa_flags = SA_NODEFER | SA_RESETHAND;
   sigaction (SIGINT, &act, NULL);
 
-  inst->halt = 0;
+  inst->state = SCXSTATE_STEADY;
   /* main loop */
-  while (!inst->halt)
+  while (inst->state != SCXSTATE_HALT)
     {
       /* Build array of pollfd in program stack (use heap in future?). */
-      struct pollfd fds[] = {
-	    { inst->srcfd, POLLIN, 0 },
-      };
-      struct pollfd *fdsiter = fds + 0;
-      int nfds = sizeof (fds) / sizeof (fds[0]);
-
-      res = poll (fds, nfds, 100);	/* SIGINT mostly happens here. */
-
-      if (res > 0)
+      switch (inst->state)
 	{
-	  for (fdsiter = fds + 0; fdsiter < fds + nfds; fdsiter++)
+	case SCXSTATE_INIT:
+	  /* TODO: move initialization to here? */
+	  break;
+	case SCXSTATE_STEADY:
 	    {
-	      if (fdsiter->fd == inst->srcfd)
+	      struct pollfd fds[] = {
+		    { inst->srcfd, POLLIN, 0 },
+	      };
+	      struct pollfd *fdsiter = fds + 0;
+	      int nfds = sizeof (fds) / sizeof (fds[0]);
+
+	      res = poll (fds, nfds, 100);    /* SIGINT mostly happens here. */
+
+	      if (res > 0)
 		{
-		  if (fdsiter->revents & POLLIN)
+		  for (fdsiter = fds + 0; fdsiter < fds + nfds; fdsiter++)
 		    {
-		      scxrelay_copy_event ();
+		      if (fdsiter->fd == inst->srcfd)
+			{
+			  if (fdsiter->revents & POLLIN)
+			    {
+			      scxrelay_copy_event ();
+			    }
+			  if (fdsiter->revents & POLLERR)
+			    {
+			      /* error in polling; presumably disconnect. */
+			      printf("Error in fd %d\n", fdsiter->fd);
+			      close (inst->srcfd);
+			      inst->state = SCXSTATE_FAILED;
+			    }
+			}
 		    }
 		}
 	    }
+	  break;
+	case SCXSTATE_FAILED:
+	  /* keep trying to re-open event_path. */
+	  if (inst->event_path[0])
+	    {
+	      inst->srcfd = open (inst->event_path, O_RDWR);
+	      if (inst->srcfd < 0)
+		{
+		  usleep(100000);  /* retry after 0.1s */
+		}
+	      else
+		{
+		  printf("Recovered as fd %d\n", inst->srcfd);
+		  inst->state = SCXSTATE_STEADY;
+		}
+	    }
+	  else
+	    {
+	      usleep(200000);  /* no recovery, but process remains alive for
+				  sake of wrapper script. */
+	    }
+	  break;
+	default:
+	  break;
 	}
     }
 
